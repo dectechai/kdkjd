@@ -1,0 +1,120 @@
+name: Windows 10 RDP with ngrok
+
+on:
+  workflow_dispatch:
+    inputs:
+      rdp_username:
+        description: 'RDP Username (optional)'
+        required: false
+        default: 'runneradmin'
+        type: string
+      rdp_password:
+        description: 'RDP Password (optional)'
+        required: false
+        default: 'P@ssw0rd123!'
+        type: string
+
+jobs:
+  setup-windows-rdp:
+    runs-on: windows-latest
+    timeout-minutes: 360
+
+    steps:
+    - name: Enable RDP
+      run: |
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
+        Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 1
+        Write-Host "✅ RDP has been enabled"
+      shell: powershell
+
+    - name: Create RDP User
+      run: |
+        $username = "${{ github.event.inputs.rdp_username }}"
+        $password = "${{ github.event.inputs.rdp_password }}"
+        try {
+          Get-LocalUser -Name $username -ErrorAction Stop
+          Write-Host "User $username already exists"
+        } catch {
+          $securePassword = ConvertTo-SecureString $password -AsPlainText -Force
+          New-LocalUser -Name $username -Password $securePassword -FullName "RDP User"
+          Write-Host "✅ Created user: $username"
+        }
+        Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username -ErrorAction SilentlyContinue
+        Add-LocalGroupMember -Group "Administrators" -Member $username -ErrorAction SilentlyContinue
+        Write-Host "✅ User configured for RDP"
+      shell: powershell
+
+    - name: Download and Install ngrok
+      run: |
+        $ngrokUrl = "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip"
+        $ngrokZip = "$env:TEMP\ngrok.zip"
+        $ngrokDir = "$env:TEMP\ngrok"
+        Invoke-WebRequest -Uri $ngrokUrl -OutFile $ngrokZip
+        Expand-Archive -Path $ngrokZip -DestinationPath $ngrokDir -Force
+        New-Item -ItemType Directory -Path "C:\ngrok" -Force
+        Copy-Item "$ngrokDir\ngrok.exe" -Destination "C:\ngrok\ngrok.exe"
+        $env:PATH += ";C:\ngrok"
+        [Environment]::SetEnvironmentVariable("PATH", $env:PATH, [EnvironmentVariableTarget]::Machine)
+        Write-Host "✅ ngrok installed"
+      shell: powershell
+
+    - name: Set ngrok Authtoken
+      run: |
+        C:\ngrok\ngrok.exe config add-authtoken 2zJA7O7OMu7kjdBroaU9YktZK7P_38UpMAmtEJuext6ymq9Qa
+        Write-Host "✅ ngrok authtoken set"
+      shell: powershell
+
+    - name: Start ngrok and Show RDP Info
+      run: |
+        Write-Host "🚀 Starting ngrok tunnel on port 3389..."
+
+        $ngrokOutput = & "C:\ngrok\ngrok.exe" tcp 3389 --log stdout
+        $publicUrl = ($ngrokOutput | Select-String -Pattern "tcp://.*").Matches.Value
+
+        if ($publicUrl) {
+          $parts = $publicUrl -replace "tcp://", "" -split ":"
+          $ngrokHost = $parts[0]
+          $ngrokPort = $parts[1]
+
+          Write-Host "============================================"
+          Write-Host "🎉 Windows 10 RDP is now accessible!"
+          Write-Host "RDP Host: $ngrokHost"
+          Write-Host "RDP Port: $ngrokPort"
+          Write-Host "Username: ${{ github.event.inputs.rdp_username }}"
+          Write-Host "Password: ${{ github.event.inputs.rdp_password }}"
+          Write-Host "============================================"
+
+          $connectionInfo = @"
+Windows 10 RDP Access
+
+Host: $ngrokHost
+Port: $ngrokPort
+Username: ${{ github.event.inputs.rdp_username }}
+Password: ${{ github.event.inputs.rdp_password }}
+
+Use with: mstsc /v:$ngrokHost:$ngrokPort
+"@
+          $connectionInfo | Out-File -FilePath rdp_connection_info.txt -Encoding UTF8
+        } else {
+          Write-Host "❌ Failed to extract ngrok public URL"
+          exit 1
+        }
+      shell: powershell
+
+    - name: Keep Session Alive (6 Hours)
+      run: |
+        $end = (Get-Date).AddHours(6)
+        while ((Get-Date) -lt $end) {
+          Write-Host "💓 RDP session alive - $(Get-Date)"
+          Start-Sleep -Seconds 300
+        }
+        Write-Host "🕒 Session ended"
+      shell: powershell
+
+    - name: Upload RDP Info
+      uses: actions/upload-artifact@v4
+      with:
+        name: rdp-connection-info
+        path: rdp_connection_info.txt
+        retention-days: 1
